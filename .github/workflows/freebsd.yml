@@ -32,7 +32,7 @@ jobs:
         with:
           release: "14.3"
           usesh: true
-          mem: 8192
+          mem: 12288
           prepare: |
             pkg install -y curl git cmake pkgconf llvm19 perl5 \
               libxkbcommon wayland libX11 libXrandr libXi libXcursor mesa-libs gtk3
@@ -41,6 +41,9 @@ jobs:
             set -e
             . "$HOME/.cargo/env"
             export LIBCLANG_PATH=/usr/local/llvm19/lib
+            # Linking the UI test binaries in parallel ran the VM out of memory: keep debug info
+            # to line tables and cap the jobs.
+            export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-tables-only CARGO_BUILD_JOBS=4
             rustc --version
             cargo build --workspace --all-targets --locked
             cargo test --workspace --locked

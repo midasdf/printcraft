@@ -40,6 +40,9 @@ jobs:
           run: |
             set -e
             . "$HOME/.cargo/env"
+            # The checkout is copied in owned by another user; git (used by `xtask assets`) would
+            # refuse it as "dubious ownership". The host's checkout step only trusts it out here.
+            git config --global --add safe.directory "$PWD"
             export LIBCLANG_PATH=/usr/local/llvm19/lib
             # Linking the UI test binaries in parallel ran the VM out of memory: keep debug info
             # to line tables and cap the jobs.

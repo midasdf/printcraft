@@ -1,5 +1,5 @@
 # FreeBSD: build and test in a FreeBSD VM (GitHub has no FreeBSD runners). Formatting and clippy
-# run in CI's other jobs; this one proves PrintCraft builds and its tests pass on FreeBSD.
+# run in CI's other jobs; this one proves PrintCraft builds, its tests pass and it packages on FreeBSD.
 name: FreeBSD
 
 on:
@@ -34,7 +34,7 @@ jobs:
           usesh: true
           mem: 12288
           prepare: |
-            pkg install -y curl git cmake pkgconf llvm19 perl5 \
+            pkg install -y bash curl git cmake pkgconf llvm19 perl5 \
               libxkbcommon wayland libX11 libXrandr libXi libXcursor mesa-libs gtk3
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
           run: |
@@ -51,3 +51,6 @@ jobs:
             cargo build --workspace --all-targets --locked
             cargo test --workspace --locked
             cargo xtask layers
+            # The release packaging, end to end (a quicker release profile than the real release).
+            CARGO_PROFILE_RELEASE_LTO=false CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 packaging/freebsd/package.sh
+            tar -tzf dist/release/printcraft-*-freebsd-*.tar.gz | grep -E '/bin/printcraft$|/bin/printcraft-cli$|applications/'

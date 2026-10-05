@@ -1,0 +1,47 @@
+# FreeBSD: build and test in a FreeBSD VM (GitHub has no FreeBSD runners). Formatting and clippy
+# run in CI's other jobs; this one proves PrintCraft builds and its tests pass on FreeBSD.
+name: FreeBSD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freebsd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (FreeBSD 14.3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test in a FreeBSD VM
+        # vmactions/freebsd-vm v1.5.9, pinned by commit: it runs our build, so a moved tag must
+        # not change what executes here.
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc
+        with:
+          release: "14.3"
+          usesh: true
+          mem: 8192
+          prepare: |
+            pkg install -y curl git cmake pkgconf llvm19 perl5 \
+              libxkbcommon wayland libX11 libXrandr libXi libXcursor mesa-libs gtk3
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            export LIBCLANG_PATH=/usr/local/llvm19/lib
+            rustc --version
+            cargo build --workspace --all-targets --locked
+            cargo test --workspace --locked
+            cargo xtask layers

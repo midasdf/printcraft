@@ -23,6 +23,22 @@ pub enum Family {
 }
 
 impl Family {
+    /// Approximate a PDF font name with the standard family used by editing controls.
+    pub fn from_name(base_font: &str) -> Self {
+        let name = base_font.to_ascii_lowercase();
+        if ["courier", "mono", "consolas", "menlo", "monaco", "lucida console"].iter().any(|s| name.contains(s)) {
+            Self::Courier
+        } else if !name.contains("sans")
+            && ["times", "serif", "roman", "cambria", "georgia", "palatino", "garamond", "mincho", "ming", "song", "明朝"]
+                .iter()
+                .any(|s| name.contains(s))
+        {
+            Self::Times
+        } else {
+            Self::Helvetica
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Family::Helvetica => "Helvetica",

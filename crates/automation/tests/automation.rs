@@ -972,6 +972,12 @@ fn editing_existing_text_through_tools() {
     );
     let p = &ok(&mut a, "text_paragraphs", json!({ "doc": doc, "page": 3 }))["paragraphs"][0];
     assert_eq!((p["text"].as_str(), p["font"].as_str(), p["size"].as_f64()), (Some("Part three"), Some("Times-Bold"), Some(20.0)));
+    // Bold/italic can be changed independently without resetting the family.
+    ok(&mut a, "text_edit", json!({ "doc": doc, "page": 3, "paragraph": 1, "bold": false }));
+    assert_eq!(ok(&mut a, "text_paragraphs", json!({ "doc": doc, "page": 3 }))["paragraphs"][0]["font"], "Times-Roman");
+    ok(&mut a, "text_edit", json!({ "doc": doc, "page": 3, "paragraph": 1, "bold": true }));
+    assert_eq!(ok(&mut a, "text_paragraphs", json!({ "doc": doc, "page": 3 }))["paragraphs"][0]["font"], "Times-Bold");
+    assert!(matches!(a.call("text_edit", &json!({ "doc": doc, "page": 3, "paragraph": 1, "bold": "yes" })), Err(ToolError::InvalidArgs(_))));
     // Moved 15 pt right and 10 pt down (dy is up; the listing's rect is measured from the top).
     let rect = |p: &serde_json::Value| -> Vec<f64> { p["rect"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect() };
     let before = rect(p);

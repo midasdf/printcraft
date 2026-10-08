@@ -4,6 +4,8 @@
 //! `CRAFT_FONTS_DIR=<checkout>`; otherwise [`CRAFT_FONTS`] is empty and everything here returns
 //! nothing. Callers must work either way.
 
+use skrifa::MetadataProvider;
+
 /// A font from the optional craft-fonts build input (empty unless built with `CRAFT_FONTS_DIR`).
 pub struct CraftFont {
     pub family: &'static str,
@@ -19,6 +21,13 @@ impl CraftFont {
     /// Whether the font is meant for `script` (ISO 15924, e.g. `"Jpan"`).
     pub fn covers(&self, script: &str) -> bool {
         self.scripts.contains(&script)
+    }
+
+    /// Whether this face maps every character in `text` to a glyph.
+    pub fn supports(&self, text: &str) -> bool {
+        let Ok(font) = skrifa::FontRef::new(self.bytes) else { return false };
+        let map = font.charmap();
+        text.chars().all(|c| map.map(c).is_some())
     }
 
     /// A unique name for registering the face with a font system ("BIZ UDPGothic Bold").

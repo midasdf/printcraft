@@ -296,7 +296,12 @@ fn japanese_line_uses_unicode_type3_fallback() {
     let mut doc = text_page("BT /F2 12 Tf 72 700 Td (ab) Tj ET");
     let replacement = "25362738こんにちは、お元気ですか？ 2.3444";
     let result = text::replace_line(&mut doc, 0, 0, replacement).unwrap();
-    assert_eq!(result.substituted.as_deref(), Some("Shippori Mincho Type3"));
+    let expected = if pdfcraft_fonts::CRAFT_FONTS.iter().any(|f| f.family == "BIZ UDPGothic" && f.style == "Regular") {
+        "BIZ UDPGothic Regular Type3".to_string()
+    } else {
+        format!("{} Type3", pdfcraft_fonts::document_japanese_font().unwrap().name())
+    };
+    assert_eq!(result.substituted.as_deref(), Some(expected.as_str()));
     let bytes = page_content_bytes(&doc, 0);
     let content = String::from_utf8_lossy(&bytes);
     assert!(content.contains("/PCJp"), "{content}");
@@ -469,9 +474,9 @@ fn missing_glyphs_substitute_helvetica_and_impossible_text_is_refused() {
     let doc2 = reopen(&doc);
     let lines = text::text_lines(&doc2, 0).unwrap();
     assert_eq!((lines[0].text.as_str(), lines[0].base_font.as_str()), ("abc", "Helvetica"));
-    // Neither font can show Greek.
+    // No available face can show this Unicode noncharacter.
     let mut doc = text_page("BT /F1 12 Tf 72 700 Td (Hello) Tj ET");
-    assert!(text::replace_line(&mut doc, 0, 0, "Ωmega").is_err());
+    assert!(text::replace_line(&mut doc, 0, 0, "\u{10ffff}").is_err());
     assert!(text::replace_line(&mut doc, 0, 5, "x").is_err(), "no such line");
 }
 
@@ -851,4 +856,62 @@ fn the_graphics_state_carries_over_between_content_streams() {
     let doc = split_page("q 0.5 0 0 0.5 0 0 cm", "Q BT /F1 10 Tf 100 100 Td (Footpath) Tj ET");
     let l = &text::text_lines(&doc, 0).unwrap()[0];
     assert!(close(l.rect[0], 100.0) && close(l.size, 10.0), "{l:?}");
+}
+
+#[test]
+fn japanese_fallback_preserves_family_weight_and_real_outlines() {
+    if !["Regular", "Bold"].iter().all(|style| pdfcraft_fonts::CRAFT_FONTS.iter().any(|f| f.family == "BIZ UDPGothic" && f.style == *style))
+        || !pdfcraft_fonts::CRAFT_FONTS.iter().any(|f| f.family == "Shippori Mincho" && f.style == "Regular")
+    {
+        eprintln!("skipping Japanese style regression: required craft-fonts faces unavailable");
+        return;
+    }
+    let mut programs = Vec::new();
+    for (source, expected, bold) in [
+        ("Helvetica", "BIZ UDPGothic Regular", false),
+        ("Helvetica-Bold", "BIZ UDPGothic Bold", true),
+        ("Times-Roman", "Shippori Mincho Regular", false),
+    ] {
+        for paragraph in [false, true] {
+            let mut doc = text_page("BT /F1 12 Tf 72 700 Td (Original) Tj ET");
+            doc.update_dict(pdfcraft_cos::ObjRef::new(5, 0), |d| d.set(b"BaseFont".to_vec(), pdfcraft_cos::Object::name(source))).unwrap();
+            if paragraph {
+                text::rewrite_block(&mut doc, 0, 0, Some("日本語"), &text::BlockStyle { width: Some(300.0), ..Default::default() }).unwrap();
+            } else {
+                text::replace_line(&mut doc, 0, 0, "日本語").unwrap();
+            }
+            let doc = reopen(&doc);
+            let line = &text::text_lines(&doc, 0).unwrap()[0];
+            assert_eq!(line.text, "日本語");
+            assert_eq!(line.base_font, expected);
+            assert_eq!(line.bold, bold);
+            if !paragraph {
+                let p = page_list(&doc).into_iter().next().unwrap();
+                let res = doc.resolve(p.dict.get(b"Resources").unwrap());
+                let fonts = doc.resolve(res.as_dict().unwrap().get(b"Font").unwrap());
+                let font = doc.resolve(fonts.as_dict().unwrap().get(b"PCJp").unwrap());
+                let chars = doc.resolve(font.as_dict().unwrap().get(b"CharProcs").unwrap());
+                let glyph = doc.resolve(chars.as_dict().unwrap().get(b"g01").unwrap());
+                let pdfcraft_cos::Object::Stream(stream) = &*glyph else { panic!("missing glyph stream") };
+                programs.push(stream.decoded().unwrap());
+            }
+        }
+    }
+    assert_ne!(programs[0], programs[1], "bold must change the actual glyph outline");
+    assert_ne!(programs[0], programs[2], "sans and serif must draw different outlines");
+}
+
+#[test]
+fn japanese_paragraph_uses_the_requested_font_style() {
+    if !pdfcraft_fonts::CRAFT_FONTS.iter().any(|f| f.family == "BIZ UDPGothic" && f.style == "Bold") {
+        eprintln!("skipping Japanese style override regression: BIZ UDPGothic Bold unavailable");
+        return;
+    }
+    let mut doc = text_page("BT /F1 12 Tf 72 700 Td (Original) Tj ET");
+    let style = text::BlockStyle { family: Some((added::Family::Helvetica, true, false)), width: Some(300.0), ..Default::default() };
+    text::rewrite_block(&mut doc, 0, 0, Some("日本語"), &style).unwrap();
+    let doc = reopen(&doc);
+    let line = &text::text_lines(&doc, 0).unwrap()[0];
+    assert_eq!(line.base_font, "BIZ UDPGothic Bold");
+    assert!(line.bold);
 }

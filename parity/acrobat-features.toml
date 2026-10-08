@@ -1807,7 +1807,7 @@ status = "shipped"
 commands = ["edit.edit_text"]
 tools = ["text_edit"]
 evidence = ["crates/edit/src/tests.rs::japanese_paragraph_keeps_ideographic_spaces", "crates/edit/src/tests.rs::paragraphs_are_found_and_rewrapped", "crates/edit/src/tests.rs::text_lines_are_found_and_replaced_in_place", "crates/ui-egui/tests/editing.rs::editing_existing_text_in_place", "crates/automation/tests/automation.rs::editing_existing_text_through_tools"]
-notes = "edited paragraphs are rewrapped to the box width with the font's own advance widths and the original line spacing, starting at the original text matrix; text state and fill colour restored after; a single line grows to the right margin; U+3000 ideographic spaces are preserved (including paragraph edges and repeated spaces); Japanese font-style fallback remains limited (#184)"
+notes = "edited paragraphs are rewrapped to the box width with the font's own advance widths and the original line spacing, starting at the original text matrix; text state and fill colour restored after; a single line grows to the right margin; U+3000 ideographic spaces are preserved (including paragraph edges and repeated spaces); Japanese replacements prefer available serif/sans and bold faces and report the actual font (#184); exact-font and italic matching remain limited"
 
 [[feature]]
 id = "edit.text-move-resize"
@@ -1866,8 +1866,8 @@ milestone = "M7"
 status = "shipped"
 commands = ["edit.edit_text"]
 tools = ["text_edit"]
-evidence = ["crates/edit/src/tests.rs::justify_underline_and_spacing", "crates/edit/src/tests.rs::paragraphs_take_new_formatting", "crates/ui-egui/tests/editing.rs::the_format_panel_restyles_the_paragraph_being_edited"]
-notes = "bold and italic through the standard families; underline drawn under each line in the text colour"
+evidence = ["crates/edit/src/tests.rs::japanese_fallback_preserves_family_weight_and_real_outlines", "crates/edit/src/tests.rs::japanese_paragraph_uses_the_requested_font_style", "crates/automation/tests/automation.rs::editing_existing_text_through_tools", "crates/edit/src/tests.rs::justify_underline_and_spacing", "crates/edit/src/tests.rs::paragraphs_take_new_formatting", "crates/ui-egui/tests/editing.rs::the_format_panel_restyles_the_paragraph_being_edited"]
+notes = "Japanese replacement prefers available serif/sans and bold faces and reports the actual face; standalone bold/italic tool overrides keep the source family; exact-font and Japanese italic-face matching remain limited. bold and italic through the standard families; underline drawn under each line in the text colour"
 
 [[feature]]
 id = "edit.text-super-subscript"

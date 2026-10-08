@@ -429,6 +429,8 @@ impl Automation {
                 if dx.is_some() || dy.is_some() {
                     style.offset = Some([dx.unwrap_or(0.0), dy.unwrap_or(0.0)]);
                 }
+                let bold = a.opt_bool("bold")?;
+                let italic = a.opt_bool("italic")?;
                 if let Some(f) = a.opt_str("font")? {
                     let family = match f {
                         "helvetica" => pdfcraft_engine::FontFamily::Helvetica,
@@ -436,7 +438,10 @@ impl Automation {
                         "courier" => pdfcraft_engine::FontFamily::Courier,
                         other => return Err(ToolError::InvalidArgs(format!("unknown font {other:?} (helvetica, times, courier)"))),
                     };
-                    style.family = Some((family, a.opt_bool("bold")?.unwrap_or(false), a.opt_bool("italic")?.unwrap_or(false)));
+                    style.family = Some((family, bold.unwrap_or(false), italic.unwrap_or(false)));
+                } else if bold.is_some() || italic.is_some() {
+                    style.family =
+                        Some((pdfcraft_engine::FontFamily::from_name(&block.base_font), bold.unwrap_or(block.bold), italic.unwrap_or(block.italic)));
                 }
                 if let Some(c) = a.opt_str("color")? {
                     style.color = Some(comments::parse_color(c)?);

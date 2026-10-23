@@ -18,7 +18,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 use pdfcraft_content::Matrix;
-use pdfcraft_cos::{Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
+use pdfcraft_cos::{DecodeBudget, Dict, Document, ObjRef, Object, SaveOptions, Stream, write_full};
 
 pub mod range;
 pub mod spool;
@@ -328,7 +328,8 @@ pub const LABEL_PAPER: usize = 31;
 /// ISO B4/B5 and the Japanese papers without a PPD name are asked for as custom sizes,
 /// `Custom.<width>x<height>mm` (the form CUPS documents, and the one the system's media lookup
 /// recognises; the older `w<h>` PPD keywords only work on a queue that advertises them).
-/// `Env10` is the US #10 envelope.
+/// `Env10` is the US #10 envelope, and the 4 × 6 shipping label keeps its `w288h432` keyword:
+/// that path works today, and this change does not touch it.
 pub fn cups_media(index: usize) -> Option<&'static str> {
     match PAPERS.get(index)?.0 {
         "US Letter" => Some("Letter"),
@@ -351,7 +352,7 @@ pub fn cups_media(index: usize) -> Option<&'static str> {
         "Kaku #3" => Some("Custom.216x277mm"),
         "Yonroku-ban" => Some("Custom.127x188mm"),
         "US #10 Envelope (4.125 x 9.5 in)" => Some("Env10"),
-        _ if index == LABEL_PAPER => Some("Custom.101.6x152.4mm"),
+        _ if index == LABEL_PAPER => Some("w288h432"), // 4×6 ラベルは今までどおり PPD のキーワード
         _ => None,
     }
 }
@@ -390,11 +391,14 @@ pub fn text_reads_up(doc: &Document, index: usize) -> bool {
     let to_display = Matrix(page.view_matrix(doc)).invert().unwrap_or_default();
     let res = page.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
     let mut score = 0i64;
-    text_direction(doc, &decoded_contents(doc, &page.dict), &res, to_display, 0, &mut score);
+    let mut budget = DecodeBudget::page();
+    // Content past the budget is left out: the answer is a guess from the text read so far.
+    let data = decoded_contents(doc, &page.dict, &mut budget).unwrap_or_default();
+    text_direction(doc, &data, &res, to_display, 0, &mut score, &mut budget);
     score > 0
 }
 
-fn text_direction(doc: &Document, data: &[u8], res: &Dict, base: Matrix, depth: usize, score: &mut i64) {
+fn text_direction(doc: &Document, data: &[u8], res: &Dict, base: Matrix, depth: usize, score: &mut i64, budget: &mut DecodeBudget) {
     let (mut ctm, mut tm, mut stack) = (base, Matrix::IDENTITY, Vec::new());
     for op in pdfcraft_content::parse(data).ops {
         match op.op.as_slice() {
@@ -417,8 +421,11 @@ fn text_direction(doc: &Document, data: &[u8], res: &Dict, base: Matrix, depth: 
                 }
                 let m = form.dict.get(b"Matrix").and_then(|m| doc.resolve(m).as_array().and_then(|a| Matrix::from_operands(a))).unwrap_or_default();
                 let inner = form.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_else(|| res.clone());
-                if let Ok(body) = form.decoded() {
-                    text_direction(doc, &body, &inner, m.then(&ctm), depth + 1, score);
+                if !budget.enter_form() {
+                    continue;
+                }
+                if let Ok(body) = budget.decode(form) {
+                    text_direction(doc, &body, &inner, m.then(&ctm), depth + 1, score, budget);
                 }
             }
             _ => {}
@@ -735,24 +742,41 @@ fn n(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
-fn decoded_contents(doc: &Document, page: &Dict) -> Vec<u8> {
-    let list: Vec<Object> = match page.get(b"Contents") {
-        None => Vec::new(),
-        Some(c) => match &*doc.resolve(c) {
-            Object::Array(a) => a.clone(),
-            _ => vec![c.clone()],
-        },
-    };
+/// The page's content streams decoded against `budget` and joined; streams that don't decode
+/// are left out. `None` when the budget ran out, so part of the content is missing.
+fn decoded_contents(doc: &Document, page: &Dict, budget: &mut DecodeBudget) -> Option<Vec<u8>> {
+    let Some(contents) = page.get(b"Contents") else { return Some(Vec::new()) };
     let mut out = Vec::new();
-    for o in list {
-        if let Object::Stream(s) = &*doc.resolve(&o)
-            && let Ok(d) = s.decoded()
-        {
-            out.extend_from_slice(&d);
-            out.push(b'\n');
+    for data in budget.decode_contents(doc, contents) {
+        match data {
+            Ok(data) => {
+                out.extend_from_slice(&data);
+                out.push(b'\n');
+            }
+            Err(_) if budget.remaining() == 0 => return None,
+            Err(_) => {}
         }
     }
-    out
+    Some(out)
+}
+
+/// Reduce `doc`'s pages to what [`impose`] draws of them under `content`: the annotations that
+/// don't print are dropped, and with [`Content::FormFieldsOnly`] the page content too. For
+/// printing pages as pictures, where a renderer draws each page as it stands.
+pub fn keep_printed(doc: &mut Document, content: Content) {
+    for page in pdfcraft_model::pages(doc) {
+        let annots = page.dict.get(b"Annots").and_then(|a| doc.resolve(a).as_array().cloned()).unwrap_or_default();
+        let kept: Vec<Object> = annots.into_iter().filter(|a| doc.resolve(a).as_dict().is_some_and(|d| prints(doc, d, content))).collect();
+        // Fails only when the page object isn't a dictionary, and such a page draws nothing.
+        let _ = doc.update_dict(page.obj, |d| {
+            if content == Content::FormFieldsOnly {
+                d.remove(b"Contents");
+            }
+            if d.contains(b"Annots") {
+                d.set(b"Annots".to_vec(), Object::Array(kept));
+            }
+        });
+    }
 }
 
 /// Does annotation `d` print under `content`?
@@ -810,16 +834,24 @@ fn appearance_matrix(doc: &Document, form: &Dict, rect: [f64; 4]) -> Option<Matr
 }
 
 /// A Form XObject holding page `index` as it prints (user space; BBox = crop box).
+/// `pages` are the document's pages, listed once by the caller: listing them for each page
+/// printed would make printing quadratic in the page count.
 fn page_form(
     doc: &mut Document,
+    pages: &[pdfcraft_model::Page],
     index: usize,
     content: Content,
     promoted: &mut std::collections::HashMap<ObjRef, ObjRef>,
 ) -> Result<ObjRef, PrintError> {
-    let page = pdfcraft_model::pages(doc).swap_remove(index);
+    let page = pages.get(index).ok_or_else(|| PrintError::Invalid(format!("there is no page {}", index.saturating_add(1))))?;
     let crop = page.crop(doc);
     let mut res = page.dict.get(b"Resources").and_then(|r| doc.resolve(r).as_dict().cloned()).unwrap_or_default();
-    let mut body = if content == Content::FormFieldsOnly { Vec::new() } else { decoded_contents(doc, &page.dict) };
+    let mut body = if content == Content::FormFieldsOnly {
+        Vec::new()
+    } else {
+        decoded_contents(doc, &page.dict, &mut DecodeBudget::page())
+            .ok_or_else(|| PrintError::Invalid(format!("page {} has more content than can be printed", index + 1)))?
+    };
     // Wrap the page content so a state it leaves behind can't affect the annotations.
     if !body.is_empty() {
         let mut wrapped = b"q\n".to_vec();
@@ -881,10 +913,24 @@ fn page_form(
     Ok(doc.add(Object::Stream(Stream::flate(d, &body))))
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Pages listed by [`source_pages`] on this thread.
+    static PAGES_LISTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The source document's pages, for printing.
+fn source_pages(doc: &Document) -> Vec<pdfcraft_model::Page> {
+    let pages = pdfcraft_model::pages(doc);
+    #[cfg(test)]
+    PAGES_LISTED.with(|c| c.set(c.get() + pages.len()));
+    pages
+}
+
 /// Build the print-ready PDF for `settings`. Encryption is not carried over (the file goes to a
 /// printer or is the user's own copy); callers must check the print permission first.
 pub fn impose(src: &Document, settings: &Settings) -> Result<Vec<u8>, PrintError> {
-    let pages = pdfcraft_model::pages(src);
+    let pages = source_pages(src);
     let sizes: Vec<(f64, f64)> = pages.iter().map(|p| p.display_size(src)).collect();
     let sheets = layout(&sizes, settings)?;
     let mut doc = src.clone();
@@ -901,7 +947,7 @@ pub fn impose(src: &Document, settings: &Settings) -> Result<Vec<u8>, PrintError
             let form = match forms.get(&pl.page) {
                 Some(f) => *f,
                 None => {
-                    let f = page_form(&mut doc, pl.page, settings.content, &mut promoted)?;
+                    let f = page_form(&mut doc, &pages, pl.page, settings.content, &mut promoted)?;
                     forms.insert(pl.page, f);
                     f
                 }

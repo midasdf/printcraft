@@ -193,6 +193,17 @@ fn custom_pages_per_sheet_never_overfill_the_grid() {
 }
 
 #[test]
+fn imposing_lists_the_pages_once() {
+    let n = 150;
+    let doc = fixture(n);
+    PAGES_LISTED.with(|c| c.set(0));
+    let out = impose(&doc, &settings((0..n).collect(), Layout::multiple(2))).unwrap();
+    let listed = PAGES_LISTED.with(|c| c.get());
+    assert!(listed <= 2 * n, "{listed} pages listed to print {n}");
+    assert_eq!(pdfcraft_model::pages(&Document::open(Arc::new(out)).unwrap()).len(), n / 2);
+}
+
+#[test]
 fn booklets_pair_pages_for_folding() {
     let sizes = vec![(200.0, 300.0); 6];
     let sheets = layout(&sizes, &settings((0..6).collect(), Layout::Booklet { subset: BookletSubset::BothSides, binding: Binding::Left })).unwrap();
@@ -720,7 +731,7 @@ fn japanese_papers_keep_their_measured_sizes_and_names() {
     for (i, (name, _)) in PAPERS.iter().enumerate() {
         assert_eq!(find_paper(name), Some(i), "{name}");
     }
-    assert_eq!(cups_media(LABEL_PAPER), Some("Custom.101.6x152.4mm"));
+    assert_eq!(cups_media(LABEL_PAPER), Some("w288h432"), "4×6 ラベルは今までどおり PPD のキーワード");
     for (name, media) in [
         ("A6", "A6"),
         ("B4 (JIS)", "B4"),
@@ -751,8 +762,13 @@ fn japanese_papers_reach_the_spooler_as_a_custom_media_size() {
         let args = lp_args(&job).join(" ");
         assert!(args.contains(&format!("-o media={media}")), "{name}: {args}");
     }
-    // No paper is asked for as a PPD keyword: every one without a standard name is a custom size.
+    // No Japanese sheet is asked for as a PPD keyword any more: every one without a standard
+    // name uses the custom-size form. The 4 x 6 label keeps its `w288h432` keyword, which is the
+    // path that works today (shipping-label printing) and is unchanged by this PR.
     for (i, (name, _)) in PAPERS.iter().enumerate() {
+        if i == LABEL_PAPER {
+            continue;
+        }
         let Some(media) = cups_media(i) else { continue };
         assert!(!(media.starts_with('w') && media.contains('h')), "{name}: {media} is a PPD keyword, not a custom size");
     }
@@ -798,7 +814,7 @@ fn label_is_cut_turned_upright_and_fitted_without_distortion() {
     let label = LABEL_PAPER;
     assert_eq!(PAPERS[label].0, "4 x 6 in label (101.6 x 152.4 mm)");
     assert_eq!(PAPERS[label].1, (288.0, 432.0));
-    assert_eq!(cups_media(label), Some("Custom.101.6x152.4mm"));
+    assert_eq!(cups_media(label), Some("w288h432"));
     // A sideways label in the lower half of an A4 sheet, text running bottom-to-top.
     let rect = [40.0, 30.0, 560.0, 420.0];
     for (text_up, flip, want_text_dir) in [(true, false, (1.0, 0.0)), (false, false, (1.0, 0.0)), (true, true, (-1.0, 0.0))] {
@@ -985,3 +1001,55 @@ fn driver_options_take_the_ppds_own_names_in_the_ui_language() {
 }
 
 mod appearances;
+
+#[test]
+fn repeated_content_references_share_one_decode_budget() {
+    let mut doc = Document::new_empty();
+    let stream = doc.add(Stream::flate(Dict::new(), &vec![b' '; 1 << 20]));
+    let page: Dict = [(b"Contents".to_vec(), Object::Array(vec![Object::Ref(stream); 300]))].into_iter().collect();
+    let data = decoded_contents(&doc, &page, &mut DecodeBudget::page());
+    assert!(data.is_none_or(|d| d.len() <= pdfcraft_cos::MAX_PAGE_DECODED + 300));
+}
+
+/// 20 draws of a form that draws the next form 20 times, four levels down: 168,420 form
+/// entries from a few hundred bytes.
+fn form_fanout(doc: &mut Document) -> Dict {
+    let draws = "/X Do ".repeat(20);
+    let mut form = |content: &str, inner: Option<ObjRef>| {
+        let mut d: Dict = [(b"Subtype".to_vec(), Object::Name(b"Form".to_vec()))].into_iter().collect();
+        if let Some(inner) = inner {
+            let xobjects: Dict = [(b"X".to_vec(), Object::Ref(inner))].into_iter().collect();
+            let res: Dict = [(b"XObject".to_vec(), Object::Dict(xobjects))].into_iter().collect();
+            d.set(b"Resources".to_vec(), Object::Dict(res));
+        }
+        doc.add(Stream::from_raw(d, content.as_bytes().to_vec()))
+    };
+    let mut inner = form("BT 0 1 -1 0 0 0 Tm (a) Tj ET", None);
+    for _ in 0..3 {
+        inner = form(&draws, Some(inner));
+    }
+    let xobjects: Dict = [(b"X".to_vec(), Object::Ref(inner))].into_iter().collect();
+    [(b"XObject".to_vec(), Object::Dict(xobjects))].into_iter().collect()
+}
+
+#[test]
+fn text_direction_stops_at_the_form_budget() {
+    let mut doc = Document::new_empty();
+    let res = form_fanout(&mut doc);
+    let mut score = 0;
+    text_direction(&doc, "/X Do ".repeat(20).as_bytes(), &res, Matrix::IDENTITY, 0, &mut score, &mut DecodeBudget::page());
+    assert!(score > 0 && score <= pdfcraft_cos::MAX_PAGE_FORMS as i64, "score {score}");
+}
+
+/// A form refused by the spent budget is left out; the text drawn after it still counts.
+#[test]
+fn text_direction_reads_on_past_a_refused_form() {
+    let mut doc = Document::new_empty();
+    let form = doc.add(Stream::from_raw([(b"Subtype".to_vec(), Object::Name(b"Form".to_vec()))].into_iter().collect(), Vec::new()));
+    let xobjects: Dict = [(b"X".to_vec(), Object::Ref(form))].into_iter().collect();
+    let res: Dict = [(b"XObject".to_vec(), Object::Dict(xobjects))].into_iter().collect();
+    let mut score = 0;
+    let content = b"/X Do BT 0 1 -1 0 0 0 Tm (a) Tj ET";
+    text_direction(&doc, content, &res, Matrix::IDENTITY, 0, &mut score, &mut DecodeBudget::new(1 << 20, 0));
+    assert_eq!(score, 1);
+}

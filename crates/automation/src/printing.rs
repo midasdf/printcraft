@@ -32,11 +32,64 @@ fn add_media(options: &mut Vec<(String, String)>, paper: usize) {
     }
 }
 
+/// [`duplex`] for a job laid out as `layout`: the name is checked either way, and a booklet
+/// decides two-sided itself (#2707), as the Print dialog does (`print::booklet_duplex`).
+fn job_duplex(value: &str, layout: &Layout) -> Result<Option<spool::Duplex>> {
+    let chosen = duplex(value, matches!(layout, Layout::Multiple { order: PageOrder::CutStack, .. }))?;
+    Ok(match layout {
+        Layout::Booklet { subset, .. } => Some(print::booklet_duplex(*subset)),
+        _ => chosen,
+    })
+}
+
+/// An invalid-arguments error saying `m`.
 fn bad(m: impl Into<String>) -> ToolError {
     ToolError::InvalidArgs(m.into())
 }
 
+/// `doc_print`'s `paper`, by its name or a short form ("Letter", "ARCH D"), as its `PAPERS`
+/// index and size; US Letter when none is given.
+fn paper_named(name: Option<&str>) -> Result<(usize, (f64, f64))> {
+    let index = match name {
+        None => 0,
+        Some(p) => print::find_paper(p).ok_or_else(|| {
+            bad(format!("unknown paper {p:?}; choose one of {}", PAPERS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")))
+        })?,
+    };
+    Ok((index, PAPERS[index].1))
+}
+
+/// The spooler job for `doc_print` to `printer`. It feeds the paper the PDF was laid out on
+/// (`PAPERS[paper]`, as `media` after the driver's `options`) rather than the queue's default
+/// paper, which a job naming none got (A4 under Letter sheets on the queue in #3752).
+fn spool_job(a: &Args, printer: &str, title: String, duplex: Option<spool::Duplex>, paper: usize) -> Result<spool::Job> {
+    let mut options = match a.get("options") {
+        None => Vec::new(),
+        Some(Value::Object(m)) => m
+            .iter()
+            .map(|(k, v)| match v.as_str() {
+                Some(v) => Ok((k.clone(), v.to_string())),
+                None => Err(bad(format!("options.{k} must be a string (a choice from printer_options)"))),
+            })
+            .collect::<Result<Vec<_>>>()?,
+        Some(_) => return Err(bad("options must be an object of option keys and choices from printer_options")),
+    };
+    add_media(&mut options, paper);
+    Ok(spool::Job {
+        printer: if printer == "default" { None } else { Some(printer.to_string()) },
+        copies: a.opt_int("copies")?.unwrap_or(1).clamp(1, 999) as u32,
+        collate: a.opt_bool("collate")?.unwrap_or(true),
+        duplex,
+        scaling: spool::Scaling::Exact,
+        grayscale: a.opt_bool("grayscale")?.unwrap_or(false),
+        title,
+        options,
+    })
+}
+
 impl Automation {
+    /// `printers`: the system's printers, the default marked, and each one's two-sided support
+    /// where the spooler reports it.
     pub(crate) fn printers(&self) -> Result<Value> {
         let list: Vec<Value> = spool::printers()
             .into_iter()
@@ -63,6 +116,8 @@ impl Automation {
         Ok(json!({ "printer": printer, "count": list.len(), "options": list }))
     }
 
+    /// `doc_print`: lay the document out with the Print dialog's options, then save the
+    /// print-ready PDF to `path` or send it to `printer` with the chosen paper.
     pub(crate) fn doc_print(&mut self, a: &Args) -> Result<Value> {
         let doc = self.doc(a)?;
         let (id, count) = (doc.id, doc.info.pages.len());
@@ -118,7 +173,7 @@ impl Automation {
             },
             l => return Err(bad(format!("unknown layout {l:?}"))),
         };
-        let duplex = duplex(a.opt_str("duplex")?.unwrap_or("off"), matches!(layout, Layout::Multiple { order: PageOrder::CutStack, .. }))?;
+        let duplex = job_duplex(a.opt_str("duplex")?.unwrap_or("off"), &layout)?;
         if a.opt_str("order")? == Some("cut-stack") && !matches!(layout, Layout::Multiple { .. }) {
             return Err(bad("cut-stack order needs layout multiple"));
         }
@@ -135,13 +190,7 @@ impl Automation {
             "form-fields-only" => Content::FormFieldsOnly,
             c => return Err(bad(format!("unknown comments_forms {c:?}"))),
         };
-        let paper_index = match a.opt_str("paper")? {
-            None => 0,
-            Some(p) => print::find_paper(p).ok_or_else(|| {
-                bad(format!("unknown paper {p:?}; choose one of {}", PAPERS.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")))
-            })?,
-        };
-        let paper = PAPERS[paper_index].1;
+        let (paper_index, paper) = paper_named(a.opt_str("paper")?)?;
         // Print as image (Acrobat's Advanced Print Setup): pictures at `dpi`, grey when
         // `grayscale` is also asked for.
         let raster = if a.opt_bool("as_image")?.unwrap_or(false) {
@@ -165,31 +214,7 @@ impl Automation {
                 out["path"] = json!(path.to_string_lossy());
             }
             (None, Some(printer)) => {
-                let name = self.doc(a)?.name.clone();
-                let job = spool::Job {
-                    printer: if printer == "default" { None } else { Some(printer.to_string()) },
-                    copies: a.opt_int("copies")?.unwrap_or(1).clamp(1, 999) as u32,
-                    collate: a.opt_bool("collate")?.unwrap_or(true),
-                    duplex,
-                    scaling: spool::Scaling::Exact,
-                    grayscale: a.opt_bool("grayscale")?.unwrap_or(false),
-                    title: name,
-                    options: {
-                        let mut options = match a.get("options") {
-                            None => Vec::new(),
-                            Some(Value::Object(m)) => m
-                                .iter()
-                                .map(|(k, v)| match v.as_str() {
-                                    Some(v) => Ok((k.clone(), v.to_string())),
-                                    None => Err(bad(format!("options.{k} must be a string (a choice from printer_options)"))),
-                                })
-                                .collect::<Result<Vec<_>>>()?,
-                            Some(_) => return Err(bad("options must be an object of option keys and choices from printer_options")),
-                        };
-                        add_media(&mut options, paper_index);
-                        options
-                    },
-                };
+                let job = spool_job(a, printer, self.doc(a)?.name.clone(), duplex, paper_index)?;
                 out["job"] = json!(spool::submit(&bytes, &job).map_err(|e| failed(e.to_string()))?);
             }
             _ => return Err(bad("pass either path (save the print-ready PDF) or printer (a name from printers, or \"default\")")),
@@ -201,6 +226,19 @@ impl Automation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2707: a booklet sets two-sided itself whatever `duplex` asks; a bad name is still an error.
+    #[test]
+    fn a_booklet_decides_two_sided_itself() {
+        let booklet = |subset| Layout::Booklet { subset, binding: Binding::Left };
+        for asked in ["printer", "off", "long-edge", "short-edge"] {
+            assert_eq!(job_duplex(asked, &booklet(BookletSubset::BothSides)).ok(), Some(Some(spool::Duplex::ShortEdge)), "{asked}");
+            assert_eq!(job_duplex(asked, &booklet(BookletSubset::FrontOnly)).ok(), Some(Some(spool::Duplex::Off)), "{asked}");
+            assert_eq!(job_duplex(asked, &booklet(BookletSubset::BackOnly)).ok(), Some(Some(spool::Duplex::Off)), "{asked}");
+        }
+        assert!(job_duplex("sideways", &booklet(BookletSubset::BothSides)).is_err());
+        assert_eq!(job_duplex("long-edge", &Layout::Size(SizeMode::Fit)).ok(), Some(Some(spool::Duplex::LongEdge)), "other layouts keep it");
+    }
 
     /// `printer` leaves two-sided to the printer's own default (#2422); cut and stack still asks
     /// for single-sided sheets, and refuses an explicit edge.
@@ -228,5 +266,31 @@ mod tests {
         let mut explicit = vec![("Media".to_string(), "A4".to_string())];
         add_media(&mut explicit, postcard);
         assert_eq!(explicit, vec![("Media".to_string(), "A4".to_string())]);
+    }
+
+    /// #3752: `doc_print` to a printer sent no paper, so the queue's default paper stood in for
+    /// the one the sheets were laid out on (A4 under Letter sheets on the report's queue).
+    #[test]
+    fn printing_to_a_printer_feeds_the_laid_out_paper() {
+        let job = |args: Value, paper_name: Option<&str>| {
+            let (index, _) = paper_named(paper_name).unwrap();
+            spool_job(&Args(&args), "Office", "a.pdf".into(), None, index).unwrap()
+        };
+        let media = |m: &str| ("media".to_string(), m.to_string());
+        // US Letter when no paper is asked for, after the driver's own options.
+        let letter = job(json!({ "options": { "InputSlot": "Tray3" } }), None);
+        assert_eq!(letter.options, [("InputSlot".to_string(), "Tray3".to_string()), media("Letter")]);
+        assert_eq!((letter.printer.as_deref(), letter.title.as_str()), (Some("Office"), "a.pdf"));
+        // Every paper, by its full name, goes out as its own media name.
+        for (i, (name, size)) in PAPERS.iter().enumerate() {
+            assert_eq!(paper_named(Some(name)).ok(), Some((i, *size)), "{name}");
+            assert_eq!(job(json!({}), Some(name)).options, print::media_option(i).into_iter().collect::<Vec<_>>(), "{name}");
+        }
+        // Short forms find the same paper.
+        assert_eq!(job(json!({}), Some("letter")).options, [media("Letter")]);
+        assert_eq!(job(json!({}), Some("ARCH D")).options, [media("na_arch-d_24x36in")]);
+        assert!(matches!(paper_named(Some("Quarto")), Err(ToolError::InvalidArgs(m)) if m.contains("US Letter")));
+        assert_eq!(spool_job(&Args(&json!({})), "default", String::new(), None, 0).ok().map(|j| j.printer), Some(None));
+        assert!(spool_job(&Args(&json!({ "options": { "InputSlot": 3 } })), "Office", String::new(), None, 0).is_err());
     }
 }

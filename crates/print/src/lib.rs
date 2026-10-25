@@ -280,10 +280,11 @@ impl Default for Settings {
 
 /// Common paper sizes (points, portrait).
 ///
-/// The Japanese sheets are the JIS sizes (JIS X 6310), which Japanese printing uses: JIS B4
-/// 257 × 364 mm and JIS B5 182 × 257 mm are not the ISO 216 B sheets (250 × 353 mm and
-/// 176 × 250 mm), which are listed next to them unqualified. はがき and 往復はがき, the 長形 and
-/// 角形 envelopes and 四六判 are the sizes of Japanese office and book printing.
+/// The Japanese sheets are the JIS sizes (JIS P 0138 defines the B series), which Japanese
+/// printing uses: JIS B4 257 × 364 mm and JIS B5 182 × 257 mm are not the ISO 216 B sheets
+/// (250 × 353 mm and 176 × 250 mm), which are listed next to them unqualified. はがき and
+/// 往復はがき, the 長形 and 角形 envelopes and 四六判 are the sizes of Japanese office and book
+/// printing.
 pub const PAPERS: [(&str, (f64, f64)); 33] = [
     ("US Letter", (612.0, 792.0)),
     ("US Legal", (612.0, 1008.0)),

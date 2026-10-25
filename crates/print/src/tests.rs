@@ -694,7 +694,7 @@ fn japanese_papers_keep_their_measured_sizes_and_names() {
         let (pw, ph) = PAPERS[at(name)].1;
         assert!((pw - w).abs() < 0.02 && (ph - h).abs() < 0.02, "{name}: {pw} x {ph}, not {w} x {h}");
     };
-    // JIS B (JIS X 6310) is not ISO B: the two are separate papers of different sizes.
+    // JIS B (JIS P 0138) is not ISO B: the two are separate papers of different sizes.
     near("B4 (JIS)", 728.50, 1031.81);
     near("B5 (JIS)", 515.91, 728.50);
     near("B6 (JIS)", 362.83, 515.91);

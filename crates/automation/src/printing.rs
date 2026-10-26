@@ -22,12 +22,12 @@ fn duplex(value: &str, cut_stack: bool) -> Result<Option<spool::Duplex>> {
     })
 }
 
-/// Adds the sheet the PDF was laid out on to a job's driver options, unless the caller named one:
-/// a queue would otherwise print on its default paper.
+/// Adds the sheet the PDF was laid out on to a job's driver options, so a queue does not print
+/// on its default paper. It goes **after** the caller's `printer_options`, which is the order
+/// `main` has always sent: the sheets are already laid out for that paper, so it wins over a
+/// `media` the caller also named.
 fn add_media(options: &mut Vec<(String, String)>, paper: usize) {
-    if !options.iter().any(|(key, _)| key.eq_ignore_ascii_case("media"))
-        && let Some(media) = print::cups_media(paper)
-    {
+    if let Some(media) = print::cups_media(paper) {
         options.push(("media".to_string(), media.to_string()));
     }
 }
@@ -254,18 +254,19 @@ mod tests {
     }
 
     /// The job names the sheet the PDF was laid out on, so the queue does not fall back to its
-    /// own default paper; a `media` the caller passes from `printer_options` still wins.
+    /// own default paper. It comes after the caller's `printer_options`, as `main` sends it, so
+    /// the laid-out paper wins over a `media` the caller also named.
     #[test]
-    fn job_media_names_the_paper_unless_the_caller_names_it() {
+    fn job_media_follows_the_callers_options_and_names_the_laid_out_paper() {
         let postcard = print::find_paper("Japanese Postcard").expect("Japanese Postcard is a paper");
         let mut options = vec![("InputSlot".to_string(), "Tray2".to_string())];
         add_media(&mut options, postcard);
-        assert!(options.contains(&("InputSlot".to_string(), "Tray2".to_string())), "{options:?}");
-        assert!(options.contains(&("media".to_string(), "Custom.100x148mm".to_string())), "{options:?}");
+        assert_eq!(options, vec![("InputSlot".to_string(), "Tray2".to_string()), ("media".to_string(), "Custom.100x148mm".to_string()),]);
 
+        // A `media` from `printer_options` stays, but the laid-out paper follows it and wins.
         let mut explicit = vec![("Media".to_string(), "A4".to_string())];
         add_media(&mut explicit, postcard);
-        assert_eq!(explicit, vec![("Media".to_string(), "A4".to_string())]);
+        assert_eq!(explicit, vec![("Media".to_string(), "A4".to_string()), ("media".to_string(), "Custom.100x148mm".to_string()),]);
     }
 
     /// #3752: `doc_print` to a printer sent no paper, so the queue's default paper stood in for

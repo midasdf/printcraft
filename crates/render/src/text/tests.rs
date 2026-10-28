@@ -1990,8 +1990,6 @@ fn stacked_vertical_cjk_from_a_pdf_copies_in_reading_order() {
     assert_eq!(text.find("遊客慢慢上山"), vec![14..20]);
     // Three lines, one per column, and no line reads across the page.
     assert_eq!(text.line_of, [0; 7].iter().copied().chain([1; 7]).chain([2; 7]).collect::<Vec<u32>>());
-
-
 }
 
 #[test]
